@@ -2,7 +2,8 @@ import os
 import re
 import sys
 import string
-import argparse  # TODO: Use this
+import logging
+import argparse
 import requests
 import xlsxwriter
 from datetime import datetime
@@ -12,6 +13,21 @@ from tabulate import tabulate
 import tkinter as tk
 from tkinter import filedialog
 from tkinter import messagebox
+
+# Setup the arguments that the user can pass
+parser = argparse.ArgumentParser()
+parser.add_argument("-a", dest="api_key", help="use an API key specified by [API_KEY]", action="store")
+parser.add_argument("-f", dest="bom_file", help="load a BOM from [BOM_FILE]", action="store")
+parser.add_argument("-j", "--save_json", help="save the results of the json queries to disk", action="store_true")
+parser.add_argument("-s", "--save_pdfs", help="save the RoHS compliance PDFs to disk", action="store_true")
+parser.add_argument("-d", dest="debug_log_file", help="save a debug log to disk at [DEBUG_LOG_FILE]", action="store")
+args = parser.parse_args()
+
+save_debug_log = False
+
+if args.debug_log_file is not None:
+	save_debug_log = True
+	logging.basicConfig(filename=args.debug_log_file, level=logging.DEBUG)
 
 # The API key that actually allows requests
 API_KEY = ''
@@ -78,9 +94,17 @@ def make_API_call(pn):
 	url += '&pretty_print=true'
 	url += '&apikey=' + API_KEY
 
-	partjson = requests.get(url).json()
+	partinfo = requests.get(url)
 
-	return partjson
+	# Save the JSON info for each request
+	if args.save_json:
+		filename = "JSON/" + re.sub(r'[\\/*?:"<>|]', "", pn) + ".json"
+		if not os.path.exists(os.path.dirname(filename)):
+			os.makedirs(os.path.dirname(filename))
+		with open(filename, 'w') as js:
+			js.write(partinfo.text)
+
+	return partinfo.json()
 
 #Return the lifecycle status for the selected part
 #	partjson is the JSON file for the part returned by the API function
@@ -88,13 +112,13 @@ def make_API_call(pn):
 def lifecycle_status(partjson, sel):
 	
 	try:
-		log.append('PN ' + partjson['results'][0]['items'][sel]['mpn'] + ' - Checking lifecycle status...')
+		logging.debug('PN ' + partjson['results'][0]['items'][sel]['mpn'] + ' - Checking lifecycle status...')
 		lifecycle_status = partjson['results'][0]['items'][sel]['specs']['lifecycle_status']['value'][0]
 	except KeyError:
-		log.append('PN ' + partjson['results'][0]['items'][sel]['mpn'] + ' - Error - No Lifecycle Information Given')
+		logging.debug('PN ' + partjson['results'][0]['items'][sel]['mpn'] + ' - Error - No Lifecycle Information Given')
 		return 'No lifecycle information given'
 	
-	log.append('PN ' + partjson['results'][0]['items'][sel]['mpn'] + ' - Lifecycle status found, written to results')
+	logging.debug('PN ' + partjson['results'][0]['items'][sel]['mpn'] + ' - Lifecycle status found, written to results')
 	#Check to see whether that file exists
 	return lifecycle_status
 
@@ -107,7 +131,7 @@ def rohs_compliance(partjson, sel):
 	numco = len(partjson['results'][0]['items'][sel]['compliance_documents'])
 	#Empty array for document types
 	types = []
-
+ 
 	#Loop through all compliance documents
 	for i in range(numco):
 		#Append the type of document to the 'types' array
@@ -116,14 +140,17 @@ def rohs_compliance(partjson, sel):
 	#	Also append 'Yes' to the cdo array
 	#print(types)
 	if 'rohs_statement' in types:
-		log.append('PN ' + partjson['results'][0]['items'][sel]['mpn'] + ' - Found RoHS documentation')
+		logging.debug('PN ' + partjson['results'][0]['items'][sel]['mpn'] + ' - Found RoHS documentation')
 		rl = types.index('rohs_statement')
-		url = partjson['results'][0]['items'][sel]['compliance_documents'][rl]['url']
-		download_file(partjson['results'][0]['items'][sel]['mpn'], 'RoHS', url)
-		cdo.append('Yes')
+		if args.save_pdfs:
+			url = partjson['results'][0]['items'][sel]['compliance_documents'][rl]['url']
+			download_file(partjson['results'][0]['items'][sel]['mpn'], 'RoHS', url)
+			cdo.append('Yes')
+		else:
+			cdo.append('No')
 	#If the RoHS statement isn't found, append 'No'
 	else:
-		log.append('PN ' + partjson['results'][0]['items'][sel]['mpn'] + ' - No URL found for compliance document')
+		logging.debug('PN ' + partjson['results'][0]['items'][sel]['mpn'] + ' - No URL found for compliance document')
 		cdo.append('NO VALID URL FOUND')
 
 	#A list of all of the specs
@@ -135,14 +162,14 @@ def rohs_compliance(partjson, sel):
 	
 	#Check to see if there is RoHS status information in the specs
 	if 'rohs_status' in spt:
-		log.append('PN ' + partjson['results'][0]['items'][sel]['mpn'] + ' - Found RoHS key, checking...')
+		logging.debug('PN ' + partjson['results'][0]['items'][sel]['mpn'] + ' - Found RoHS key, checking...')
 		#If there is, check to see if a valid value is given
 		if partjson['results'][0]['items'][sel]['specs']['rohs_status']['value']:
-			log.append('PN ' + partjson['results'][0]['items'][sel]['mpn'] + ' - RoHS status found, written to results')
+			logging.debug('PN ' + partjson['results'][0]['items'][sel]['mpn'] + ' - RoHS status found, written to results')
 			compliance = partjson['results'][0]['items'][sel]['specs']['rohs_status']['value'][0]
 	#Otherwise, output 'NOT FOUND'
 	else:
-		log.append('PN ' + partjson['results'][0]['items'][sel]['mpn'] + ' - No RoHS information found')
+		logging.debug('PN ' + partjson['results'][0]['items'][sel]['mpn'] + ' - No RoHS information found')
 		compliance = 'NOT FOUND'
 
 	#Return the compliance status
@@ -159,7 +186,7 @@ def download_file(pn, typ, url):
 	with open(filename, 'wb') as out_file:
 		for chunk in response.iter_content(chunk_size=1024):
 			out_file.write(chunk)
-	log.append('PN ' + pn + ' - RoHS information downloaded')
+	logging.debug('PN ' + pn + ' - RoHS information downloaded')
 	print(typ + ' document written to ' + filename + '\n')
 	return
 
@@ -235,12 +262,12 @@ def write_spreadsheet(dlist):
 		for x in range(5):
 			worksheet.write(y, x, dlist[y-1][x])	
 	workbook.close()
-	log.append('PN ' + pjs['results'][0]['items'][sel]['mpn'] + ' - Results spreadsheet saved.')
+	logging.debug('PN ' + pjs['results'][0]['items'][sel]['mpn'] + ' - Results spreadsheet saved.')
 	return wb_fn
 
 #Prompt the user for an API key if one wasn't provided at the command line
 def get_api_key():
-	log.append('No API key given, prompting user')
+	logging.debug('No API key given, prompting user')
 	return input('Please enter API key: ')
 
 #Output the number of Bom items that were found
@@ -255,7 +282,7 @@ def coverage(dlist):
 def write_log():
 	today = str(datetime.now().replace(second=0, microsecond=0))
 	filename = save_dir + '/RoHS_Scrub_LOGFILE.txt'
-	log.append('Saving log...')
+	logging.debug('Saving log...')
 	with open(filename, 'w') as f:
 		f.write(today + '\n')
 		f.write('---START---\n')
@@ -265,10 +292,10 @@ def write_log():
 		f.write('---END---')
 		f.close()
 
-if(len(sys.argv)) < 2:
-	API_KEY = get_api_key()
+if args.api_key is not None:
+	API_KEY = args.api_key
 else:
-	API_KEY = sys.argv[1]
+	API_KEY = get_api_key()
 
 #Prompt the user for the text file of part numbers
 parts = open_file()
@@ -285,26 +312,26 @@ for item in range(len(parts)):
 		lcs.append('NOT FOUND')
 		rohsc.append('NOT FOUND')
 		cdo.append('No')
-		log.append('PN: ' + parts[item] + ' - No Results. Check part number')
+		logging.debug('PN ' + parts[item] + ' - No Results. Check part number')
 	elif numi == 1:
 		sel = 0
 		#Find lifecycle status, append it to list
 		lcs.append(lifecycle_status(pjs, sel))
 		#Find RoHS status, append it to list
 		rohsc.append(rohs_compliance(pjs, sel))
-		log.append('PN: ' + parts[item] + ' - One match.')
+		logging.debug('PN ' + parts[item] + ' - One match.')
 	else:
-		log.append('PN: ' + parts[item] + ' - Multiple part matches.')
+		logging.debug('PN ' + parts[item] + ' - Multiple part matches.')
 		#Prompt the user for the proper part
 		sel = part_select(pjs)
 		if sel != -1:
-			log.append('PN: ' + parts[item] + ' - User selected ' +  pjs['results'][0]['items'][sel]['manufacturer']['name'] + ' ' +  pjs['results'][0]['items'][sel]['mpn'] )
+			logging.debug('PN ' + parts[item] + ' - User selected ' +  pjs['results'][0]['items'][sel]['manufacturer']['name'] + ' ' +  pjs['results'][0]['items'][sel]['mpn'] )
 			#Find lifecycle status, append it to list
 			lcs.append(lifecycle_status(pjs, sel))
 			#Find RoHS status, append it to list
 			rohsc.append(rohs_compliance(pjs, sel))
 		else:
-			log.append('PN: ' + parts[item] + ' - User selected no part match. Skipping.')
+			logging.debug('PN ' + parts[item] + ' - User selected no part match. Skipping.')
 			lcs.append('CHECK P/N')
 			rohsc.append('CHECK P/N')
 
